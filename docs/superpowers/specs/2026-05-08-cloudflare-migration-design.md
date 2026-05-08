@@ -36,7 +36,7 @@ Routes attached to the Worker:
 - `matthewjeffreyabrams.com/*`
 - `www.matthewjeffreyabrams.com/*`
 
-Cloudflare manages DNS records automatically when custom domains are attached to the Worker.
+DNS for both hostnames is managed manually in the Cloudflare dashboard. Routes only fire on hostnames that have a *proxied* DNS record in the zone, so each hostname needs at least one (the existing apex `A` record satisfies this for the apex; `www` may need a placeholder added — see Cutover step 2).
 
 ## Files
 
@@ -105,14 +105,14 @@ Claude cannot create the API token or paste secrets into GitHub; the user does t
 ## Cutover Plan
 
 1. **Local-deploy verification.** User runs `npx wrangler login` (browser flow), then `npx wrangler deploy` from the repo. Confirms the Worker responds at `https://mja-dot-com.<account-subdomain>.workers.dev` and serves `index.html`.
-2. **Attach custom domains.** The two `[[routes]]` entries in `wrangler.toml` cause Cloudflare to attach the custom domains on the next deploy. Cloudflare automatically rewrites the proxied DNS record for `matthewjeffreyabrams.com` from the Railway origin to the Worker. The `www` record is created if absent.
+2. **Attach routes.** The `[[routes]]` entries in `wrangler.toml` are bound to the Worker on the next deploy. Cloudflare's edge then routes all matching requests to the Worker *before* they reach any origin. The existing proxied `A` record (currently pointing at Railway) is shadowed and no longer hit — this is the zero-downtime cutover. If the `www.` hostname has no proxied DNS record yet, a placeholder proxied record (e.g. `A 192.0.2.1`) must be added to the zone for the route to fire on that hostname; the actual IP is irrelevant because the Worker route takes precedence.
 3. **Production verification.** `curl -I https://matthewjeffreyabrams.com` should show response headers indicating the Worker is serving (e.g., `server: cloudflare` plus a fast TTFB; the Railway origin headers should be gone). `curl -I https://www.matthewjeffreyabrams.com` should return `301` to apex.
 4. **Decommission Railway.** Delete the Railway service for this project. The repo no longer auto-deploys to Railway.
 5. **Cleanup commit.** Remove `railway.toml` and `Staticfile`. Push to main. GitHub Actions runs and confirms the production deploy path works end-to-end.
 
 ## Rollback
 
-- **Before step 4 (Railway still running):** Rollback is one DNS edit. Re-point the proxied `A` record for `matthewjeffreyabrams.com` back to the Railway origin and remove the Worker's custom-domain binding. The Railway service is still live, so the site immediately serves from Railway again.
+- **Before step 4 (Railway still running):** Rollback is one config edit. Remove the `[[routes]]` entries from `wrangler.toml` and redeploy (or delete the routes via the Cloudflare dashboard). The proxied `A` record still points at Railway, so traffic immediately falls through to the Railway origin again.
 - **After step 4:** Rollback requires reinstating the Railway service from git history (`railway.toml` and `Staticfile` are recoverable from git). This is a deliberate one-way door — only proceed once step 3 has succeeded.
 
 ## Testing
@@ -127,7 +127,8 @@ This is a static site with no test suite, so verification is manual:
 
 | Risk | Mitigation |
 |---|---|
-| Custom-domain attachment fails because the zone has a conflicting non-proxied DNS record | Inspect existing DNS records before deploy; remove or reconcile any conflicting `A`/`CNAME` for the apex/www. |
+| `www.` has no proxied DNS record, so the Worker route never fires on that hostname | Before step 2, ensure a proxied DNS record exists for `www.matthewjeffreyabrams.com`. If none exists, add `A 192.0.2.1` (proxied) — placeholder IP, since the Worker route handles the request before the IP is consulted. |
+| Cleanup-time confusion: after Railway is gone, the apex `A` record still references a stale Railway IP | After step 4, replace the apex `A` record with `192.0.2.1` (proxied) so the DNS reflects "no real origin — served by Worker." Cosmetic, but prevents future debugging confusion. |
 | API token scope is too narrow and `wrangler deploy` fails | Use the "Edit Cloudflare Workers" template, which grants the necessary Workers Scripts + Zone:Workers Routes permissions. |
 | GitHub Actions runs before secrets are set | Add secrets before merging the workflow file, or use `workflow_dispatch` for the first run. |
 | Missing assets (favicons, PDF) silently keep 404'ing | Out of scope. Acknowledged here so it isn't mistaken for a regression caused by the migration. |
